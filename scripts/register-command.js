@@ -1,16 +1,43 @@
-const {DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_GUILD_ID} = process.env;
-if (![DISCORD_TOKEN, DISCORD_APPLICATION_ID, DISCORD_GUILD_ID].every(Boolean)) {
-  console.error('Thiếu DISCORD_TOKEN, DISCORD_APPLICATION_ID hoặc DISCORD_GUILD_ID trong môi trường.');
+
+const {
+  DISCORD_TOKEN,
+  DISCORD_APPLICATION_ID
+} = process.env;
+
+if (!DISCORD_TOKEN || !DISCORD_APPLICATION_ID) {
+  console.error('Thiếu DISCORD_TOKEN hoặc DISCORD_APPLICATION_ID');
   process.exit(1);
 }
-const url = `https://discord.com/api/v10/applications/${DISCORD_APPLICATION_ID}/guilds/${DISCORD_GUILD_ID}/commands`;
+
+const url = `https://discord.com/api/v10/applications/${DISCORD_APPLICATION_ID}/commands`;
+
+const commands = [
+  {
+    name: 'panel',
+    description: 'Tạo bảng điều khiển Netflix Simon',
+    type: 1,
+    default_member_permissions: '8',
+    integration_types: [0],
+    contexts: [0]
+  }
+];
+
 const response = await fetch(url, {
-  method: 'POST',
-  headers: {Authorization:`Bot ${DISCORD_TOKEN}`, 'Content-Type':'application/json'},
-  body:JSON.stringify({name:'panel', description:'Tạo bảng điều khiển Netflix Simon', type:1})
+  method: 'PUT',
+  headers: {
+    Authorization: `Bot ${DISCORD_TOKEN}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify(commands)
 });
+
 if (!response.ok) {
-  console.error('Không tạo được lệnh /panel:', response.status, await response.text());
+  console.error(
+    'Đăng ký lệnh thất bại:',
+    response.status,
+    await response.text()
+  );
   process.exit(1);
 }
-console.log('Đăng ký lệnh /panel thành công.');
+
+console.log('Đăng ký Global Command /panel thành công!');
