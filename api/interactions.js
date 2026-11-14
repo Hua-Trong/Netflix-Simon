@@ -129,7 +129,7 @@ function embed(entry) {
     fields: [
       { name: '📦 Nguồn', value: 'Kho cá nhân', inline: true },
       { name: '🏷️ Phân loại', value: clean(entry.tier, 60) || 'Mặc định', inline: true }
-    ], footer: { text: 'Liên kết thuộc quyền quản lý của bạn • Netflix Simon v1.3' },
+    ], footer: { text: 'Liên kết thuộc quyền quản lý của bạn • Netflix Simon v1.4' },
     timestamp: new Date().toISOString()
   };
 }
@@ -156,8 +156,8 @@ async function handleCommand(i) {
     type: 4,
     data: {
       embeds: [{ title: '🎬 Netflix Simon', color: 0xe50914,
-        description: '🎁 Nhấn nút để nhận một liên kết cá nhân qua DM.\n🔒 Chỉ dành cho chủ sở hữu.',
-        footer: { text: 'Netflix Simon v1.3' } }],
+        description: '🎁 Nhấn nút để nhận một liên kết được phép chia sẻ qua DM.\n🔒 Chỉ chủ bot có quyền quản lý kho.',
+        footer: { text: 'Netflix Simon v1.4' } }],
       components: [{ type: 1, components: [{ type: 2, style: 4,
         label: '🎁 Netflix Free (PC/Phone)', custom_id: BUTTON_ID }] }],
       allowed_mentions: { parse: [] }
@@ -191,7 +191,7 @@ async function handleCommand(i) {
   return message('Lệnh không được hỗ trợ.');
 }
 export default async function handler(req, res) {
-  if (req.method === 'GET') return json(res, { status: 'ok', service: 'Netflix Simon interactions', version: '1.3' });
+  if (req.method === 'GET') return json(res, { status: 'ok', service: 'Netflix Simon interactions', version: '1.4' });
   if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
   let raw;
   try {
@@ -206,10 +206,15 @@ export default async function handler(req, res) {
   try { i = JSON.parse(raw.toString('utf8')); }
   catch { return json(res, { error: 'Invalid JSON' }, 400); }
   if (i.type === 1) return json(res, { type: 1 });
-  const owner = process.env.DISCORD_OWNER_ID;
-  if (!owner) return json(res, message('❌ Chưa cấu hình DISCORD_OWNER_ID.'));
-  if (userId(i) !== owner) return json(res, message('🔒 Bot này chỉ dành cho chủ sở hữu.'));
+  // Everyone can use /panel and the public link button.
+  // Management commands are verified server-side, not merely hidden in Discord UI.
   if (i.type === 2) {
+    const name = i.data?.name;
+    if (name !== 'panel') {
+      const owner = process.env.DISCORD_OWNER_ID;
+      if (!owner) return json(res, message('❌ Chưa cấu hình DISCORD_OWNER_ID.'));
+      if (userId(i) !== owner) return json(res, message('🔒 Chỉ chủ bot mới được quản lý kho liên kết.'));
+    }
     try { return json(res, await handleCommand(i)); }
     catch (err) { console.error('Command error:', err.message); return json(res, message('❌ Không thể truy cập kho dữ liệu. Kiểm tra Vercel Logs.')); }
   }
