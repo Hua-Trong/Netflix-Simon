@@ -7,11 +7,11 @@ if (!DISCORD_TOKEN || !DISCORD_APPLICATION_ID) {
 const commands = [
   {
     name: 'panel', description: 'Tao bang dieu khien Netflix Simon', type: 1,
-    default_member_permissions: '8', integration_types: [0], contexts: [0]
+    integration_types: [0], contexts: [0, 1]
   },
   {
     name: 'add', description: 'Them lien ket HTTPS vao kho rieng', type: 1,
-    default_member_permissions: '8', integration_types: [0], contexts: [0],
+    integration_types: [0], contexts: [0, 1],
     options: [
       { type: 3, name: 'name', description: 'Ten de nhan biet', required: true, max_length: 80 },
       { type: 3, name: 'url', description: 'Lien ket HTTPS khong chua token', required: true, max_length: 1500 },
@@ -21,12 +21,12 @@ const commands = [
   },
   {
     name: 'remove', description: 'Xoa lien ket theo ID trong /list', type: 1,
-    default_member_permissions: '8', integration_types: [0], contexts: [0],
+    integration_types: [0], contexts: [0, 1],
     options: [{ type: 3, name: 'id', description: 'ID cua muc can xoa', required: true, max_length: 40 }]
   },
   {
     name: 'list', description: 'Xem cac muc trong kho', type: 1,
-    default_member_permissions: '8', integration_types: [0], contexts: [0]
+    integration_types: [0], contexts: [0, 1]
   }
 ];
 
