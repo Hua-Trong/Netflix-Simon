@@ -35,17 +35,13 @@ function clean(value, max) {
 }
 function opt(i, name) { return i.data?.options?.find(o => o.name === name)?.value; }
 function validatedUrl(value) {
-  if (typeof value !== 'string' || value.length > 1500) throw new Error('URL khong hop le.');
+  if (typeof value !== 'string' || value.length > 4000) throw new Error('URL khong hop le hoac qua dai.');
   let url;
   try { url = new URL(value); } catch { throw new Error('URL khong hop le.'); }
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
     throw new Error('Chi ho tro lien ket HTTPS thong thuong.');
   }
-  // Avoid accidentally storing login/session capabilities in the shared vault.
-  const sensitive = /(?:token|cookie|session|auth(?:orization)?|ticket|access_key|refresh|password|passwd|key)/i;
-  if ([...url.searchParams.keys()].some(k => sensitive.test(k)) || url.hash) {
-    throw new Error('Khong luu URL co token, tham so phien dang nhap hoac fragment.');
-  }
+  // Đã gỡ bỏ block regex để cho phép lưu Link chứa NFToken
   return url.toString();
 }
 function redisEnabled() {
@@ -141,24 +137,75 @@ async function inspectAttachment(attachment) {
   } finally { reader.releaseLock(); }
   const text = Buffer.concat(chunks.map(v => Buffer.from(v))).toString('utf8');
   // Raw content is discarded after parsing; session values never enter Redis or logs.
-  return inspectNetscapeCookieText(text);
+  const text = Buffer.concat(chunks.map(v => Buffer.from(v))).toString('utf8');
+  return text;
+}
+function extractRequiredCookies(text, now = Math.floor(Date.now() / 1000)) {
+  let netflixId = '', secureNetflixId = '', nfvdid = '';
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || (line.startsWith('#') && !line.startsWith('#HttpOnly_'))) continue;
+    const cols = line.split('\t');
+    if (cols.length !== 7) continue;
+    const [, , , , expiry, name, value] = cols;
+    if (Number(expiry) !== 0 && Number(expiry) < now) continue;
+    if (name === 'NetflixId') netflixId = value;
+    if (name === 'SecureNetflixId') secureNetflixId = value;
+    if (name === 'nfvdid') nfvdid = value;
+  }
+  if (!netflixId || !secureNetflixId || !nfvdid) throw new Error('File txt thiếu NetflixId, SecureNetflixId hoặc nfvdid.');
+  return { netflixId, secureNetflixId, nfvdid };
+}
+async function generateNetflixLoginLink(cookies) {
+  const cookieStr = `NetflixId=${cookies.netflixId}; SecureNetflixId=${cookies.secureNetflixId}; nfvdid=${cookies.nfvdid}`;
+  const payload = {
+    operationName: "CreateAutoLoginToken",
+    variables: { scope: "WEB_STREAMING" },
+    extensions: { persistedQuery: { version: 102, id: "76e97129-f4b5-41a0-a73c-12e674896849" } }
+  };
+  const response = await fetch("https://android13.prod.ftl.netflix.com/graphql", {
+    method: "POST",
+    headers: {
+      "User-Agent": "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)",
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Cookie": cookieStr
+    },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json().catch(() => ({}));
+  const token = data?.data?.createAutoLoginToken?.tokenValue || data?.data?.createAutoLoginToken?.token || data?.data?.createAutoLoginToken?.nftoken;
+  if (!token) throw new Error(data?.errors?.[0]?.message || "Netflix từ chối cấp token.");
+  return `https://www.netflix.com/?nftoken=${token}`;
 }
 async function saveCookieReport(i) {
   try {
     const attachmentId = String(opt(i, 'file') ?? '');
     const attachment = i.data?.resolved?.attachments?.[attachmentId];
-    const report = await inspectAttachment(attachment);
+    
+    // 1. Tải text từ file đính kèm
+    const text = await inspectAttachment(attachment);
+    
+    // 2. Trích xuất các cookie bắt buộc
+    const cookies = extractRequiredCookies(text);
+    
+    // 3. Gọi API Android để lấy Link đăng nhập tự động
+    const loginLink = await generateNetflixLoginLink(cookies);
+    
+    // 4. Lưu Link thẳng vào VAULT để người dùng bấm nút nhận được ngay
     const id = randomUUID().slice(0, 8);
-    const item = { name: clean(attachment.filename, 80), checkedAt: new Date().toISOString(), ...report };
-    await redis('HSET', REPORTS, id, JSON.stringify(item));
-    await editReply(i, `✅ Đã phân tích cấu trúc file **${clean(attachment.filename, 80)}**. ID: \`${id}\`.\n` +
-      `• Tổng dòng: ${report.rows}; đúng định dạng: ${report.valid}; sai định dạng: ${report.malformed}; hết hạn theo timestamp: ${report.expired}.\n` +
-      '🔒 Không lưu giá trị cookie, không đăng nhập hay kiểm tra LIVE/DEAD. Dùng /stats để xem thống kê.');
+    const item = { 
+      name: clean(attachment.filename, 80), 
+      url: loginLink, 
+      description: "Auto-login (NFToken)", 
+      tier: "Premium" 
+    };
+    await redis('HSET', VAULT, id, JSON.stringify(item));
+    
+    await editReply(i, `✅ **Thành công!** Đã tạo Login Link từ **${clean(attachment.filename, 80)}**.\nID: \`${id}\`.\n🔗 Liên kết đã được tự động nạp vào kho chính.`);
   } catch (err) {
-    console.error('Cookie metadata inspection failed:', err.message);
-    await editReply(i, `❌ ${['File quá lớn (tối đa 128 KB).','File vượt quá 128 KB.','Chỉ nhận file .txt.',
-      'Không tìm thấy file đính kèm.','File phải là attachment của Discord.','Không tải được file attachment.',
-      'Không đọc được dữ liệu file.'].includes(err.message) ? err.message : 'Không phân tích được file hoặc Redis chưa sẵn sàng.'}`);
+    console.error('Lỗi khi tạo NFToken:', err.message);
+    await editReply(i, `❌ Lỗi: ${err.message}`);
   }
 }
 async function cookieReports() {
