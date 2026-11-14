@@ -139,25 +139,51 @@ function extractRequiredCookies(text, now = Math.floor(Date.now() / 1000)) {
 
 async function generateNetflixLoginLink(cookies) {
   const cookieStr = `NetflixId=${cookies.netflixId}; SecureNetflixId=${cookies.secureNetflixId}; nfvdid=${cookies.nfvdid}`;
-  const payload = {
-    operationName: "CreateAutoLoginToken",
-    variables: { scope: "WEB_STREAMING" },
-    extensions: { persistedQuery: { version: 102, id: "76e97129-f4b5-41a0-a73c-12e674896849" } }
-  };
-  const response = await fetch("https://android13.prod.ftl.netflix.com/graphql", {
-    method: "POST",
-    headers: {
-      "User-Agent": "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)",
-      "Accept": "application/json",
-      "Content-Type": "application/json",
-      "Cookie": cookieStr
-    },
-    body: JSON.stringify(payload)
-  });
-  const data = await response.json().catch(() => ({}));
-  const token = data?.data?.createAutoLoginToken?.tokenValue || data?.data?.createAutoLoginToken?.token || data?.data?.createAutoLoginToken?.nftoken;
-  if (!token) throw new Error(data?.errors?.[0]?.message || "Netflix từ chối cấp token.");
-  return `https://www.netflix.com/?nftoken=${token}`;
+  const extensions = { persistedQuery: { version: 102, id: "76e97129-f4b5-41a0-a73c-12e674896849" } };
+  
+  // Danh sách các scope dự phòng mô phỏng theo checker.py
+  const scopes = ["WEBVIEW_MOBILE_STREAMING", "WEB_STREAMING", "MOBILE_STREAMING"];
+  let lastError = "Netflix từ chối cấp token.";
+
+  for (const scope of scopes) {
+    const payload = {
+      operationName: "CreateAutoLoginToken",
+      variables: { scope },
+      extensions
+    };
+
+    const response = await fetch("https://android13.prod.ftl.netflix.com/graphql", {
+      method: "POST",
+      headers: {
+        "User-Agent": "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Cookie": cookieStr
+      },
+      body: JSON.stringify(payload)
+    });
+
+    const data = await response.json().catch(() => ({}));
+    
+    // Trích xuất token
+    const token = data?.data?.createAutoLoginToken?.tokenValue 
+               || data?.data?.createAutoLoginToken?.token 
+               || data?.data?.createAutoLoginToken?.nftoken;
+
+    // Nếu lấy được token, lập tức trả về link và thoát vòng lặp
+    if (token) {
+      return `https://www.netflix.com/?nftoken=${token}`;
+    }
+    
+    // Nếu có lỗi trả về từ API
+    if (data?.errors && data.errors.length > 0) {
+      lastError = data.errors[0].message;
+      // Nếu là lỗi Access Denied (bị chặn IP/Thiết bị), thì dừng ngay
+      if (lastError.toLowerCase().includes("access denied")) break;
+    }
+  }
+  
+  throw new Error(`API lỗi: ${lastError}`);
 }
 
 async function saveCookieReport(i) {
