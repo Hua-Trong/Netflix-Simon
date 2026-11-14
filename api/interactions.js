@@ -1,29 +1,28 @@
 import { createPublicKey, verify } from 'node:crypto';
 import { waitUntil } from '@vercel/functions';
 
+// Discord signatures must be checked against the exact raw request body.
+export const config = { api: { bodyParser: false } };
+
 const API = 'https://discord.com/api/v10';
 const EPHEMERAL = 64;
 const BUTTON_ID = 'netflix_simon_get_link_v1';
 const ed25519SpkiPrefix = Buffer.from('302a300506032b6570032100', 'hex');
 
-function json(body, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'Content-Type': 'application/json; charset=utf-8' },
-  });
+function json(res, body, status = 200) {
+  return res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8').json(body);
 }
 function message(content, ephemeral = true) {
   return { type: 4, data: { content, ...(ephemeral ? { flags: EPHEMERAL } : {}) } };
 }
 function validSignature(body, signature, timestamp) {
-  if (!process.env.DISCORD_PUBLIC_KEY || !signature || !timestamp) return false;
+  if (!/^[a-f\d]{64}$/i.test(process.env.DISCORD_PUBLIC_KEY || '') || !signature || !timestamp) return false;
   try {
     const publicKey = createPublicKey({
       key: Buffer.concat([ed25519SpkiPrefix, Buffer.from(process.env.DISCORD_PUBLIC_KEY, 'hex')]),
-      format: 'der',
-      type: 'spki',
+      format: 'der', type: 'spki'
     });
-    return verify(null, Buffer.from(timestamp + body), publicKey, Buffer.from(signature, 'hex'));
+    return verify(null, Buffer.concat([Buffer.from(timestamp), body]), publicKey, Buffer.from(signature, 'hex'));
   } catch { return false; }
 }
 function getUserId(interaction) {
@@ -34,25 +33,22 @@ function getLinks() {
   try { value = JSON.parse(process.env.PERSONAL_LINKS_JSON || '[]'); }
   catch { throw new Error('PERSONAL_LINKS_JSON phải là JSON hợp lệ.'); }
   if (!Array.isArray(value)) throw new Error('PERSONAL_LINKS_JSON phải là mảng.');
-  return value.filter(x => x && typeof x.name === 'string' && typeof x.url === 'string' && /^https:\/\//i.test(x.url));
+  return value.map((x) => typeof x === 'string' ? { name: 'Liên kết cá nhân', url: x } : x)
+    .filter((x) => x && typeof x.name === 'string' && typeof x.url === 'string' && /^https:\/\//i.test(x.url));
 }
 async function discordFetch(path, method, body) {
   const response = await fetch(`${API}${path}`, {
     method,
-    headers: {
-      Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bot ${process.env.DISCORD_TOKEN}`, 'Content-Type': 'application/json' },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   if (!response.ok) throw new Error(`Discord API HTTP ${response.status}`);
   return response.json();
 }
 async function editReply(interaction, content) {
-  const response = await fetch(
-    `${API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
-    {method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content})}
-  );
+  const response = await fetch(`${API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content })
+  });
   if (!response.ok) console.error('Không thể cập nhật phản hồi:', response.status);
 }
 async function sendLink(interaction) {
@@ -62,16 +58,15 @@ async function sendLink(interaction) {
     const links = getLinks();
     if (!links.length) throw new Error('Chưa có liên kết nào trong PERSONAL_LINKS_JSON.');
     const choice = links[Math.floor(Math.random() * links.length)];
-    const userId = getUserId(interaction);
-    const channel = await discordFetch('/users/@me/channels', 'POST', {recipient_id:userId});
+    const channel = await discordFetch('/users/@me/channels', 'POST', { recipient_id: getUserId(interaction) });
     await discordFetch(`/channels/${channel.id}/messages`, 'POST', {
-      embeds:[{
-        title:'🎬 Netflix Simon — Liên kết cá nhân',
-        description:`**${choice.name.slice(0, 100)}**\n${choice.url}`,
-        color:0xe50914,
-        footer:{text:'Chỉ dùng liên kết bạn sở hữu và được phép chia sẻ.'}
+      embeds: [{
+        title: '🎬 Netflix Simon — Liên kết cá nhân',
+        description: `**${choice.name.slice(0, 100)}**\n${choice.url}`,
+        color: 0xe50914,
+        footer: { text: 'Chỉ dùng liên kết bạn sở hữu và được phép chia sẻ.' }
       }],
-      allowed_mentions:{parse:[]}
+      allowed_mentions: { parse: [] }
     });
     result = '✅ Đã gửi một liên kết vào DM của bạn.';
   } catch (error) {
@@ -81,41 +76,51 @@ async function sendLink(interaction) {
   await editReply(interaction, result);
 }
 
-export default {
-  async fetch(request) {
-    if (request.method === 'GET') return json({status:'ok', service:'Netflix Simon interactions'});
-    if (request.method !== 'POST') return json({error:'Method not allowed'}, 405);
-    const body = await request.text();
-    if (!validSignature(body, request.headers.get('x-signature-ed25519'), request.headers.get('x-signature-timestamp'))) {
-      return json({error:'Invalid request signature'}, 401);
-    }
-    let interaction;
-    try { interaction = JSON.parse(body); } catch { return json({error:'Invalid JSON'}, 400); }
-    if (interaction.type === 1) return json({type:1});
-    const owner = process.env.DISCORD_OWNER_ID;
-    if (!owner) return json(message('❌ Chưa cấu hình DISCORD_OWNER_ID.'));
-    if (getUserId(interaction) !== owner) return json(message('🔒 Bot này chỉ dành cho chủ sở hữu.'));
-    if (interaction.type === 2 && interaction.data?.name === 'panel') {
-      return json({
-        type:4,
-        data:{
-          embeds:[{
-            title:'🎬 Netflix Simon',
-            description:'Nhấn nút dưới đây để nhận một liên kết cá nhân qua DM.',
-            color:0xe50914
-          }],
-          components:[{
-            type:1,
-            components:[{type:2, style:4, label:'🎁 Netflix Free (PC/Phone)', custom_id:BUTTON_ID}]
-          }],
-          allowed_mentions:{parse:[]}
-        }
-      });
-    }
-    if (interaction.type === 3 && interaction.data?.custom_id === BUTTON_ID) {
-      waitUntil(sendLink(interaction));
-      return json({type:5, data:{flags:EPHEMERAL}});
-    }
-    return json(message('Lệnh hoặc nút không được hỗ trợ.'));
+// Vercel Node.js Functions use an exported (req, res) handler.
+export default async function handler(req, res) {
+  if (req.method === 'GET') return json(res, { status: 'ok', service: 'Netflix Simon interactions', version: '1.1' });
+  if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
+
+  let body;
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    body = Buffer.concat(chunks);
+  } catch {
+    return json(res, { error: 'Cannot read request body' }, 400);
   }
-};
+  if (!validSignature(body, req.headers['x-signature-ed25519'], req.headers['x-signature-timestamp'])) {
+    return json(res, { error: 'Invalid request signature' }, 401);
+  }
+  let interaction;
+  try { interaction = JSON.parse(body.toString('utf8')); }
+  catch { return json(res, { error: 'Invalid JSON' }, 400); }
+
+  if (interaction.type === 1) return json(res, { type: 1 });
+  const owner = process.env.DISCORD_OWNER_ID;
+  if (!owner) return json(res, message('❌ Chưa cấu hình DISCORD_OWNER_ID.'));
+  if (getUserId(interaction) !== owner) return json(res, message('🔒 Bot này chỉ dành cho chủ sở hữu.'));
+
+  if (interaction.type === 2 && interaction.data?.name === 'panel') {
+    return json(res, {
+      type: 4,
+      data: {
+        embeds: [{
+          title: '🎬 Netflix Simon',
+          description: 'Nhấn nút dưới đây để nhận một liên kết cá nhân qua DM.',
+          color: 0xe50914
+        }],
+        components: [{
+          type: 1,
+          components: [{ type: 2, style: 4, label: '🎁 Netflix Free (PC/Phone)', custom_id: BUTTON_ID }]
+        }],
+        allowed_mentions: { parse: [] }
+      }
+    });
+  }
+  if (interaction.type === 3 && interaction.data?.custom_id === BUTTON_ID) {
+    waitUntil(sendLink(interaction));
+    return json(res, { type: 5, data: { flags: EPHEMERAL } });
+  }
+  return json(res, message('Lệnh hoặc nút không được hỗ trợ.'));
+}
