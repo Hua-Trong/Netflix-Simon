@@ -20,9 +20,18 @@ const commands = [
     ]
   },
   {
-    name: 'remove', description: 'Xoa lien ket theo ID trong /list', type: 1,
+    name: 'remove', description: 'Xoa lien ket hoac bao cao file theo ID', type: 1,
     integration_types: [0], contexts: [0, 1],
     options: [{ type: 3, name: 'id', description: 'ID cua muc can xoa', required: true, max_length: 40 }]
+  },
+  {
+    name: 'upload', description: 'Kiem tra cau truc TXT va luu metadata (owner)', type: 1,
+    integration_types: [0], contexts: [0, 1],
+    options: [{ type: 11, name: 'file', description: 'File .txt; nen che gia tri cookie truoc khi gui', required: true }]
+  },
+  {
+    name: 'stats', description: 'Thong ke bao cao dinh dang cookie (owner)', type: 1,
+    integration_types: [0], contexts: [0, 1]
   },
   {
     name: 'list', description: 'Xem cac muc trong kho', type: 1,
@@ -40,4 +49,4 @@ if (!response.ok) {
   console.error('Register failed:', response.status, body.code ?? '', body.message ?? '');
   process.exit(1);
 }
-console.log('Registered /panel, /add, /remove, /list globally.');
+console.log('Registered /panel, /add, /remove, /list, /upload, /stats globally.');

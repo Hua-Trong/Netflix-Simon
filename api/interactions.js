@@ -9,6 +9,8 @@ const BUTTON_ID = 'netflix_simon_get_link_v1'; // Keep existing panels working.
 const PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 const VAULT = 'netflix-simon:v1.3:links';
 const LAST = 'netflix-simon:v1.3:last';
+const REPORTS = 'netflix-simon:v1.5:cookie-reports';
+const COOKIE_FILE_MAX_BYTES = 128 * 1024;
 
 function json(res, body, status = 200) {
   return res.status(status).setHeader('Content-Type', 'application/json; charset=utf-8').json(body);
@@ -90,6 +92,84 @@ async function entries() {
   }
   return result;
 }
+// Parse only structural cookie metadata. Never store or log cookie values.
+function inspectNetscapeCookieText(text, now = Math.floor(Date.now() / 1000)) {
+  const report = { format: 'Netscape HTTP Cookie File', rows: 0, valid: 0, malformed: 0,
+    expired: 0, netflixDomainRows: 0, sessionCookieNamesPresent: false };
+  const sessionNames = new Set(['NetflixId', 'SecureNetflixId', 'gsid']);
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || (line.startsWith('#') && !line.startsWith('#HttpOnly_'))) continue;
+    report.rows++;
+    const cols = line.split('\t');
+    if (cols.length !== 7) { report.malformed++; continue; }
+    let [domain, includeSubdomains, path, secure, expiry, name, value] = cols;
+    domain = domain.replace(/^#HttpOnly_/, '');
+    const valid = /^\.?[a-z0-9.-]+$/i.test(domain) &&
+      (includeSubdomains === 'TRUE' || includeSubdomains === 'FALSE') &&
+      path.startsWith('/') && (secure === 'TRUE' || secure === 'FALSE') &&
+      /^\d{1,12}$/.test(expiry) && name.length > 0 && value.length > 0;
+    if (!valid) { report.malformed++; continue; }
+    report.valid++;
+    if (Number(expiry) !== 0 && Number(expiry) < now) report.expired++;
+    if (domain === '.netflix.com' || domain === 'netflix.com') report.netflixDomainRows++;
+    if (sessionNames.has(name)) report.sessionCookieNamesPresent = true;
+  }
+  return report;
+}
+async function inspectAttachment(attachment) {
+  if (!attachment || typeof attachment.url !== 'string' || typeof attachment.filename !== 'string')
+    throw new Error('Không tìm thấy file đính kèm.');
+  if (!/\.txt$/i.test(attachment.filename)) throw new Error('Chỉ nhận file .txt.');
+  if (attachment.size > COOKIE_FILE_MAX_BYTES) throw new Error('File quá lớn (tối đa 128 KB).');
+  const url = new URL(attachment.url);
+  if (url.protocol !== 'https:' || !['cdn.discordapp.com','media.discordapp.net'].includes(url.hostname))
+    throw new Error('File phải là attachment của Discord.');
+  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error('Không tải được file attachment.');
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('Không đọc được dữ liệu file.');
+  const chunks = []; let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > COOKIE_FILE_MAX_BYTES) throw new Error('File vượt quá 128 KB.');
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const text = Buffer.concat(chunks.map(v => Buffer.from(v))).toString('utf8');
+  // Raw content is discarded after parsing; session values never enter Redis or logs.
+  return inspectNetscapeCookieText(text);
+}
+async function saveCookieReport(i) {
+  try {
+    const attachmentId = String(opt(i, 'file') ?? '');
+    const attachment = i.data?.resolved?.attachments?.[attachmentId];
+    const report = await inspectAttachment(attachment);
+    const id = randomUUID().slice(0, 8);
+    const item = { name: clean(attachment.filename, 80), checkedAt: new Date().toISOString(), ...report };
+    await redis('HSET', REPORTS, id, JSON.stringify(item));
+    await editReply(i, `✅ Đã phân tích cấu trúc file **${clean(attachment.filename, 80)}**. ID: \`${id}\`.\n` +
+      `• Tổng dòng: ${report.rows}; đúng định dạng: ${report.valid}; sai định dạng: ${report.malformed}; hết hạn theo timestamp: ${report.expired}.\n` +
+      '🔒 Không lưu giá trị cookie, không đăng nhập hay kiểm tra LIVE/DEAD. Dùng /stats để xem thống kê.');
+  } catch (err) {
+    console.error('Cookie metadata inspection failed:', err.message);
+    await editReply(i, `❌ ${['File quá lớn (tối đa 128 KB).','File vượt quá 128 KB.','Chỉ nhận file .txt.',
+      'Không tìm thấy file đính kèm.','File phải là attachment của Discord.','Không tải được file attachment.',
+      'Không đọc được dữ liệu file.'].includes(err.message) ? err.message : 'Không phân tích được file hoặc Redis chưa sẵn sàng.'}`);
+  }
+}
+async function cookieReports() {
+  const values = await redis('HGETALL', REPORTS);
+  if (!values) return [];
+  const items = [];
+  for (let n = 0; n < values.length; n += 2) {
+    try { items.push({id: values[n], ...JSON.parse(values[n + 1])}); } catch { /* skip */ }
+  }
+  return items;
+}
 async function pick(links) {
   if (!redisEnabled() || links.length < 2) return links[Math.floor(Math.random() * links.length)];
   const last = await redis('GET', LAST);
@@ -129,7 +209,7 @@ function embed(entry) {
     fields: [
       { name: '📦 Nguồn', value: 'Kho cá nhân', inline: true },
       { name: '🏷️ Phân loại', value: clean(entry.tier, 60) || 'Mặc định', inline: true }
-    ], footer: { text: 'Liên kết thuộc quyền quản lý của bạn • Netflix Simon v1.4' },
+    ], footer: { text: 'Liên kết thuộc quyền quản lý của bạn • Netflix Simon v1.5' },
     timestamp: new Date().toISOString()
   };
 }
@@ -157,7 +237,7 @@ async function handleCommand(i) {
     data: {
       embeds: [{ title: '🎬 Netflix Simon', color: 0xe50914,
         description: '🎁 Nhấn nút để nhận một liên kết được phép chia sẻ qua DM.\n🔒 Chỉ chủ bot có quyền quản lý kho.',
-        footer: { text: 'Netflix Simon v1.4' } }],
+        footer: { text: 'Netflix Simon v1.5' } }],
       components: [{ type: 1, components: [{ type: 2, style: 4,
         label: '🎁 Netflix Free (PC/Phone)', custom_id: BUTTON_ID }] }],
       allowed_mentions: { parse: [] }
@@ -179,19 +259,38 @@ async function handleCommand(i) {
   if (name === 'remove') {
     const id = String(opt(i, 'id') ?? '').trim();
     if (!/^[a-f0-9]{8}$/.test(id)) return message('❌ ID không hợp lệ. Dùng /list để xem ID.');
-    const removed = await redis('HDEL', VAULT, id);
-    return message(removed ? `✅ Đã xóa mục \`${id}\`.` : `❌ Không tìm thấy mục \`${id}\`.`);
+    const removedLink = await redis('HDEL', VAULT, id);
+    const removedReport = await redis('HDEL', REPORTS, id);
+    return message(removedLink || removedReport ? `✅ Đã xóa mục \`${id}\`.` : `❌ Không tìm thấy mục \`${id}\`.`);
   }
   if (name === 'list') {
     const links = await entries();
-    if (!links.length) return message('📭 Kho đang trống. Dùng /add để thêm liên kết.');
-    const rows = links.slice(0, 30).map(x => `• \`${x.id}\` — **${clean(x.name, 80)}** (${clean(x.tier, 40) || 'Mặc định'})`);
-    return message(`📦 **Kho có ${links.length} mục:**\n${rows.join('\n').slice(0, 1700)}${links.length > 30 ? '\n… và các mục khác' : ''}`);
+    const reports = await cookieReports();
+    if (!links.length && !reports.length) return message('📭 Kho đang trống. Dùng /add hoặc /upload.');
+    const rows = [
+      ...links.map(x => `🔗 \`${x.id}\` — **${clean(x.name, 80)}**`),
+      ...reports.map(x => `📄 \`${x.id}\` — **${clean(x.name, 80)}** (chỉ metadata)`)
+    ].slice(0, 30);
+    return message(`📦 **${links.length} liên kết, ${reports.length} báo cáo:**\n${rows.join('\n').slice(0, 1700)}${links.length + reports.length > 30 ? '\n…' : ''}`);
+  }
+  if (name === 'stats') {
+    const reports = await cookieReports();
+    const totals = reports.reduce((a, r) => {
+      a.rows += Number(r.rows) || 0;
+      a.valid += Number(r.valid) || 0;
+      a.malformed += Number(r.malformed) || 0;
+      a.expired += Number(r.expired) || 0;
+      return a;
+    }, { rows: 0, valid: 0, malformed: 0, expired: 0 });
+    return message(`📊 **Thống kê ${reports.length} file (metadata):**\n` +
+      `• Tổng dòng: ${totals.rows}\n• Đúng định dạng: ${totals.valid}\n` +
+      `• Sai định dạng: ${totals.malformed}\n• Đã quá hạn theo timestamp khi kiểm tra: ${totals.expired}\n` +
+      'Không xác minh cookie đang đăng nhập được (LIVE/DEAD).');
   }
   return message('Lệnh không được hỗ trợ.');
 }
 export default async function handler(req, res) {
-  if (req.method === 'GET') return json(res, { status: 'ok', service: 'Netflix Simon interactions', version: '1.4' });
+  if (req.method === 'GET') return json(res, { status: 'ok', service: 'Netflix Simon interactions', version: '1.5' });
   if (req.method !== 'POST') return json(res, { error: 'Method not allowed' }, 405);
   let raw;
   try {
@@ -214,6 +313,11 @@ export default async function handler(req, res) {
       const owner = process.env.DISCORD_OWNER_ID;
       if (!owner) return json(res, message('❌ Chưa cấu hình DISCORD_OWNER_ID.'));
       if (userId(i) !== owner) return json(res, message('🔒 Chỉ chủ bot mới được quản lý kho liên kết.'));
+    }
+    if (name === 'upload') {
+      if (!redisEnabled()) return json(res, message('❌ Chưa kết nối Redis.'));
+      waitUntil(saveCookieReport(i));
+      return json(res, { type: 5, data: { flags: EPHEMERAL } });
     }
     try { return json(res, await handleCommand(i)); }
     catch (err) { console.error('Command error:', err.message); return json(res, message('❌ Không thể truy cập kho dữ liệu. Kiểm tra Vercel Logs.')); }

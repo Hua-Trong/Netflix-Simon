@@ -1,19 +1,28 @@
-# Netflix Simon v1.4 — Public Panel, Owner-only Vault
+# Netflix Simon v1.5 — cookie format reports (metadata only)
 
-Changes compared to v1.3:
+Upgrade from v1.4 by replacing **only** `api/interactions.js` and `scripts/register-command.js` in GitHub. Keep your current Vercel project, GitHub Actions workflow, Upstash and environment variables.
 
-- `/panel`: any user can invoke it in a guild or bot DM.
-- Button `🎁 Netflix Free (PC/Phone)`: any user can request a link by DM.
-- `/add`, `/remove`, `/list`: only the Discord user ID set in `DISCORD_OWNER_ID` may run them. This is enforced inside the HTTP endpoint even if a command appears to other users.
-- All four slash commands are registered for guild (`contexts: [0]`) and bot DM (`contexts: [1]`).
-- Upstash Redis keys are unchanged from v1.3: existing entries are preserved.
+## Commands (DM and server)
 
-## Upgrade
+- `/panel` and its **Netflix Free** button: public; continue sending **approved ordinary HTTPS links**, not cookie-derived login tokens.
+- `/add name url [description] [tier]`: owner only; add a safe HTTPS link.
+- `/upload file`: owner only; accept a `.txt` attachment (128 KB max), inspect *Netscape cookie file formatting only* and save a report to Redis.
+- `/stats`: owner only; aggregate stored file-format report counts.
+- `/list`: owner only; show links and report IDs.
+- `/remove id`: owner only; delete a link or report.
 
-1. Replace `api/interactions.js` and `scripts/register-command.js` in the GitHub repository.
-2. Commit to `main`. Vercel should deploy the new API automatically.
-3. From GitHub Actions run `Register Discord Commands` once again to update slash-command contexts.
-4. Verify `DISCORD_OWNER_ID` on Vercel is your Discord account ID, keep `DISCORD_TOKEN`, `UPSTASH_REDIS_REST_TOKEN` private.
-5. Test `/panel` and the button from another account, then try `/list` from that account: it should be denied. Test `/add`, `/remove`, `/list` from your account in server and in the bot's DM.
+## Important security and functional boundaries
 
-Do not store authentication tokens, cookies, passwords, or restricted Netflix access URLs in the shared vault. Store only ordinary HTTPS links you may distribute. Public links can be given to anyone who clicks the button, including users in other servers where the application is installed.
+The `/upload` command **does not store the original file or cookie values**, does not contact Netflix, does not test whether a session is LIVE/DEAD, and does not generate login links or NFToken. A syntactically valid, unexpired cookie is **not proof it works**. Only harmless metadata is kept in Redis. The file is still transmitted to Discord as an attachment: **redact session values before uploading**, even for testing. The parser reads attachments in memory then discards their contents. Do not upload account credentials or live session tokens.
+
+Redis keys `netflix-simon:v1.3:links` and `netflix-simon:v1.3:last` remain unchanged; new reports use `netflix-simon:v1.5:cookie-reports`. `PERSONAL_LINKS_JSON` continues as fallback when Redis is not configured, as in v1.4.
+
+## Deploy
+
+1. Commit both source files to your GitHub repository `main` branch.
+2. Confirm Vercel redeploys and `https://netflix-simon.vercel.app/api/interactions` shows `version: "1.5"`.
+3. Run **GitHub Actions → Register Discord Commands → Run workflow** to register `/upload` and `/stats`.
+4. Restart Discord if the slash command cache has not refreshed.
+5. Test with a deliberately fake/redacted Netscape-format `.txt` file, then `/stats`, `/list`, `/remove`.
+
+No new secrets required. All management commands enforce `DISCORD_OWNER_ID` inside the API.
