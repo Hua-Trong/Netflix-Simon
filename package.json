@@ -1,0 +1,13 @@
+{
+  "name": "netflix-simon-vercel",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=20"},
+  "scripts": {
+    "register": "node scripts/register-command.js"
+  },
+  "dependencies": {
+    "@vercel/functions": "^2.0.0"
+  }
+}
