@@ -39,11 +39,33 @@ function getLinks() {
 async function discordFetch(path, method, body) {
   const response = await fetch(`${API}${path}`, {
     method,
-    headers: { Authorization: `Bot ${process.env.DISCORD_TOKEN}`, 'Content-Type': 'application/json' },
-    ...(body ? { body: JSON.stringify(body) } : {}),
+    headers: {
+      Authorization: `Bot ${process.env.DISCORD_TOKEN}`,
+      'Content-Type': 'application/json'
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
   });
-  if (!response.ok) throw new Error(`Discord API HTTP ${response.status}`);
-  return response.json();
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    console.error('Discord API Error:', {
+      operation: path === '/users/@me/channels'
+        ? 'CREATE_DM'
+        : path.endsWith('/messages')
+          ? 'SEND_MESSAGE'
+          : 'OTHER',
+      status: response.status,
+      code: data.code ?? null,
+      message: data.message ?? 'Unknown error'
+    });
+
+    throw new Error(
+      `Discord API ${response.status} - ${data.code ?? 'unknown'}`
+    );
+  }
+
+  return data;
 }
 async function editReply(interaction, content) {
   const response = await fetch(`${API}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`, {
@@ -71,8 +93,9 @@ async function sendLink(interaction) {
     result = '✅ Đã gửi một liên kết vào DM của bạn.';
   } catch (error) {
     console.error('Send DM failed:', error.message);
-    result = '❌ Không gửi được DM hoặc cấu hình chưa đúng. Hãy kiểm tra quyền nhận DM và biến môi trường.';
+    result = '❌ Không thể gửi DM. Vui lòng kiểm tra Vercel Logs để biết mã lỗi Discord.';
   }
+
   await editReply(interaction, result);
 }
 
